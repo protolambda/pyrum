@@ -1,4 +1,4 @@
-![](logo.png)
+![](https://raw.githubusercontent.com/protolambda/pyrum/master/logo.png)
 
 # `pyrum`
 
