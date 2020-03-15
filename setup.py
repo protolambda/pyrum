@@ -6,7 +6,7 @@ with open("README.md", "rt", encoding="utf8") as f:
 setup(
     name="pyrum",
     description="Python interface for Rumor - Eth2 networking shell",
-    version="0.0.3",
+    version="0.0.4",
     long_description=readme,
     long_description_content_type="text/markdown",
     author="protolambda",
