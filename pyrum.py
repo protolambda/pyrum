@@ -145,7 +145,7 @@ class Rumor(object):
 
 def args_to_call_path(*args, **kwargs) -> List[str]:
     # TODO: maybe escape values?
-    return list(args) + [f'--{key}="{value}"' for key, value in kwargs.items()]
+    return list(args) + [f'--{key.replace("_", "-")}="{value}"' for key, value in kwargs.items()]
 
 
 class Actor(object):

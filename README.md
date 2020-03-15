@@ -11,7 +11,7 @@ This interface maps Rumor commands to async python functions.
 The mapping is simple:
 - A command path is equal to a series of fields
 - A command argument is equal to a call argument
-- A command flag is equal to a call keyword argument
+- A command flag is equal to a call keyword argument, every `_` in the keyword is replaced with `-`
 
 Some examples:
 
