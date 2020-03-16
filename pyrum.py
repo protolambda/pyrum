@@ -111,7 +111,7 @@ class Rumor(object):
         await inp.drain()
         await self.rumor_process.wait()
 
-    def actor(self, name: str) -> "Cmd":
+    def actor(self, name: str) -> "Actor":
         if name not in self.actors:
             self.actors[name] = Actor(self, name)
         return self.actors[name]
@@ -125,22 +125,22 @@ class Rumor(object):
         inp.write((line + '\n').encode())
         await inp.drain()
 
-    def make_call(self, args: List[str]) -> "Call":
+    def make_call(self, actor: str, args: List[str]) -> "Call":
         # Get a unique call ID
         call_id = f"py_${self._unique_call_id_counter}"
         self._unique_call_id_counter += 1
         # Create the call, and remember it
-        cmd = ' '.join(args)
+        cmd = ' '.join(map(str, args))
         call = Call(call_id, cmd)
         self.calls[call_id] = call
         # Send the actual command, with call ID, to Rumor
-        asyncio.create_task(self._send_to_rumor_process(call_id + '> ' + cmd))
+        asyncio.create_task(self._send_to_rumor_process(f'{call_id}> {actor}: bg {cmd}'))
         return call
 
     # No actor, Rumor will just default to a default-actor.
     # But this is useful for commands that don't necessarily have any actor, e.g. debugging the contents of an ENR.
     def __getattr__(self, item) -> "Cmd":
-        return Cmd(self, [item])
+        return Cmd(self, 'DEFAULT_ACTOR', [item])
 
 
 def args_to_call_path(*args, **kwargs) -> List[str]:
@@ -155,11 +155,8 @@ class Actor(object):
         self.name = name
         self.q = AsyncQueue()
 
-    def __call__(self, *args, **kwargs) -> "Call":
-        return self.rumor.make_call([f'{self.name}:'] + args_to_call_path(*args, **kwargs))
-
     def __getattr__(self, item) -> "Cmd":
-        return Cmd(self.rumor, [f'{self.name}:'] + [item])
+        return Cmd(self.rumor, self.name, [item])
 
     async def on_entry(self, entry: Dict[str, Any]):
         await self.q.put(entry)
@@ -174,15 +171,16 @@ class Actor(object):
 
 
 class Cmd(object):
-    def __init__(self, rumor: Rumor, path: List[str]):
+    def __init__(self, rumor: Rumor, actor: str, path: List[str]):
         self.rumor = rumor
+        self.actor = actor
         self.path = path
 
     def __call__(self, *args, **kwargs) -> "Call":
-        return self.rumor.make_call(self.path + args_to_call_path(*args, **kwargs))
+        return self.rumor.make_call(self.actor, self.path + args_to_call_path(*args, **kwargs))
 
     def __getattr__(self, item) -> "Cmd":
-        return Cmd(self.rumor, self.path + [item])
+        return Cmd(self.rumor, self.actor, self.path + [item])
 
 
 class CallException(Exception):
