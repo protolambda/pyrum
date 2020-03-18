@@ -119,6 +119,77 @@ seq: 0
 xy: 108276226593835360659557713003549688209365448159795919906582200744288296488010 32755439791403710978696135607749543911669765691070631861819210454356664285036
 ```
 
+Another example, exchanging RPC status between two actors:
+
+```python
+from remerkleable.complex import Container
+from remerkleable.byte_arrays import Bytes32, Bytes4
+from remerkleable.basic import uint64
+
+
+class StatusReq(Container):
+    version: Bytes4
+    finalized_root: Bytes32
+    finalized_epoch: uint64
+    head_root: Bytes32
+    head_epoch: uint64
+
+
+async def basic_rpc_example():
+    rumor = Rumor()
+    await rumor.start(cmd='cd ../rumor && go run .')
+
+    alice = rumor.actor('alice')
+    await alice.host.start().ok
+    await alice.host.listen(tcp=9000).ok
+    print("started alice")
+
+    bob = rumor.actor('bob')
+    await bob.host.start().ok
+    await bob.host.listen(tcp=9001).ok
+    print("started bob")
+
+    bob_addr = await bob.host.view().enr()
+
+    alice_peer_id = await alice.host.view().peer_id()
+
+    await alice.peer.connect(bob_addr).ok
+    print("connected alice to bob!")
+
+    alice_status = StatusReq(head_epoch=42)
+    bob_status = StatusReq(head_epoch=123)
+
+    async def alice_work():
+        print("alice: listening for status requests")
+        async for req in alice.rpc.status.listen(raw=True).listen_req():
+            print(f"alice: Got request: {req}")
+            assert 'input_err' not in req
+            # Or send back an error; await alice.rpc.status.resp.invalid_request(req['req_id'], f"hello! Your request was invalid, because: {req['input_err']}").ok
+            assert req['data'] == bob_status.encode_bytes().hex()
+            resp = alice_status.encode_bytes().hex()
+            await alice.rpc.status.resp.chunk.raw(req['req_id'], resp, done=True).ok
+            break  # simple test, don't wait for more requests
+        print("alice: stopped listening for status requests")
+
+    async def bob_work():
+        # Send alice a status request
+        req = bob_status.encode_bytes().hex()
+        print(f"bob: sending alice ({alice_peer_id}) a status request: {req}")
+        resp = await bob.rpc.status.req.raw(alice_peer_id, req, raw=True).ok
+        print(f"bob: received status response from alice: {resp}")
+        assert resp['chunk_index'] == 0  # only 1 chunk
+        assert resp['result_code'] == 0  # success chunk
+        assert resp['data'] == alice_status.encode_bytes().hex()
+
+    await asyncio.wait([alice_work(), bob_work()])
+
+    # Close the Rumor process
+    await rumor.stop()
+
+
+asyncio.run(basic_rpc_example())
+```
+
 ## License
 
 MIT, see [LICENSE](./LICENSE) file.

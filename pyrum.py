@@ -88,7 +88,6 @@ class Rumor(object):
                 if self._closed.done():
                     break
                 line = next_line_fut.result()
-                line = await self.rumor_process.stderr.readline()
                 if line == b'':
                     print("Closing Rumor debug loop")
                     return
@@ -145,7 +144,7 @@ class Rumor(object):
 
 def args_to_call_path(*args, **kwargs) -> List[str]:
     # TODO: maybe escape values?
-    return list(args) + [f'--{key.replace("_", "-")}="{value}"' for key, value in kwargs.items()]
+    return [(f'"{value}"' if isinstance(value, str) else str(value)) for value in args] + [f'--{key.replace("_", "-")}="{value}"' for key, value in kwargs.items()]
 
 
 class Actor(object):
@@ -180,7 +179,7 @@ class Cmd(object):
         return self.rumor.make_call(self.actor, self.path + args_to_call_path(*args, **kwargs))
 
     def __getattr__(self, item) -> "Cmd":
-        return Cmd(self.rumor, self.actor, self.path + [item])
+        return Cmd(self.rumor, self.actor, self.path + [item.replace("_", "-")])
 
 
 class CallException(Exception):
