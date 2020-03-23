@@ -132,7 +132,7 @@ class StatusReq(Container):
     finalized_root: Bytes32
     finalized_epoch: uint64
     head_root: Bytes32
-    head_epoch: uint64
+    head_slot: uint64
 
 
 async def basic_rpc_example():
@@ -156,8 +156,8 @@ async def basic_rpc_example():
     await alice.peer.connect(bob_addr).ok
     print("connected alice to bob!")
 
-    alice_status = StatusReq(head_epoch=42)
-    bob_status = StatusReq(head_epoch=123)
+    alice_status = StatusReq(head_slot=42)
+    bob_status = StatusReq(head_slot=123)
 
     async def alice_work():
         print("alice: listening for status requests")
