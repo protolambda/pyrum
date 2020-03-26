@@ -159,17 +159,24 @@ async def basic_rpc_example():
     alice_status = StatusReq(head_slot=42)
     bob_status = StatusReq(head_slot=123)
 
-    async def alice_work():
+    async def alice_work() -> Call:
         print("alice: listening for status requests")
-        async for req in alice.rpc.status.listen(raw=True).listen_req():
-            print(f"alice: Got request: {req}")
-            assert 'input_err' not in req
-            # Or send back an error; await alice.rpc.status.resp.invalid_request(req['req_id'], f"hello! Your request was invalid, because: {req['input_err']}").ok
-            assert req['data'] == bob_status.encode_bytes().hex()
-            resp = alice_status.encode_bytes().hex()
-            await alice.rpc.status.resp.chunk.raw(req['req_id'], resp, done=True).ok
-            break  # simple test, don't wait for more requests
-        print("alice: stopped listening for status requests")
+        call = alice.rpc.status.listen(raw=True)
+
+        async def process_requests():
+            async for req in call.listen_req():
+                print(f"alice: Got request: {req}")
+                assert 'input_err' not in req
+                # Or send back an error; await alice.rpc.status.resp.invalid_request(req['req_id'], f"hello! Your request was invalid, because: {req['input_err']}").ok
+                assert req['data'] == bob_status.encode_bytes().hex()
+                resp = alice_status.encode_bytes().hex()
+                print(f"alice: sending response back to request {req['req_id']}: {resp}")
+                await alice.rpc.status.resp.chunk.raw(req['req_id'], resp, done=True).ok
+            print("alice: stopped listening for status requests")
+        asyncio.Task(process_requests())
+
+        await call.started()  # wait for the stream handler to come online, there will be a "started=true" entry.
+        return call
 
     async def bob_work():
         # Send alice a status request
@@ -177,17 +184,36 @@ async def basic_rpc_example():
         print(f"bob: sending alice ({alice_peer_id}) a status request: {req}")
         resp = await bob.rpc.status.req.raw(alice_peer_id, req, raw=True).ok
         print(f"bob: received status response from alice: {resp}")
-        assert resp['chunk_index'] == 0  # only 1 chunk
-        assert resp['result_code'] == 0  # success chunk
-        assert resp['data'] == alice_status.encode_bytes().hex()
+        chunk = resp['chunk']
+        assert chunk['chunk_index'] == 0  # only 1 chunk
+        assert chunk['result_code'] == 0  # success chunk
+        assert chunk['data'] == alice_status.encode_bytes().hex()
 
-    await asyncio.wait([alice_work(), bob_work()])
+    # Set up alice to listen for requests
+    alice_listen_call = await alice_work()
+
+    # Make bob send a request and check a response
+    await bob_work()
+
+    # Close alice
+    await alice_listen_call.cancel()
 
     # Close the Rumor process
     await rumor.stop()
 
 
 asyncio.run(basic_rpc_example())
+```
+
+```
+started alice
+started bob
+connected alice to bob!
+alice: listening for status requests
+bob: sending alice (16Uiu2HAmDTdP7NabxPSTK57vLZPqm2HcHqoj4FF37cfTE8CXQKcd) a status request: 000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007b00000000000000
+alice: Got request: {'data': '000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007b00000000000000', 'from': '16Uiu2HAm51pqF1tkxR8Z8fKRUceCgsffW53oNUDqQ97MAudfZchc', 'protocol': '/eth2/beacon_chain/req/status/1/ssz', 'req_id': 0}
+alice: sending response back to request 0: 000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002a00000000000000
+bob: received status response from alice: {'chunk': {'chunk_index': 0, 'chunk_size': 84, 'data': '000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002a00000000000000', 'from': '16Uiu2HAmDTdP7NabxPSTK57vLZPqm2HcHqoj4FF37cfTE8CXQKcd', 'protocol': '/eth2/beacon_chain/req/status/1/ssz', 'result_code': 0}, 'msg': 'Received chunk'}
 ```
 
 ## License

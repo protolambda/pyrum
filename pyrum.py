@@ -61,8 +61,7 @@ class Rumor(object):
                 # find the corresponding call, pass on the event.
                 if 'call_id' in entry:
                     call_id = entry['call_id']
-                    if isinstance(call_id, str) and call_id.startswith('@'):
-                        call_id = call_id[1:]
+                    if isinstance(call_id, str) and call_id.startswith('py_'):
                         if call_id not in self.calls:
                             continue
 
@@ -130,11 +129,15 @@ class Rumor(object):
         self._unique_call_id_counter += 1
         # Create the call, and remember it
         cmd = ' '.join(map(str, args))
-        call = Call(call_id, cmd)
+        call = Call(self, call_id, cmd)
         self.calls[call_id] = call
         # Send the actual command, with call ID, to Rumor
         asyncio.create_task(self._send_to_rumor_process(f'{call_id}> {actor}: bg {cmd}'))
         return call
+
+    async def cancel_call(self, call_id: CallID):
+        # Send the actual command, with call ID, to Rumor
+        await self._send_to_rumor_process(f'{call_id}> cancel')
 
     # No actor, Rumor will just default to a default-actor.
     # But this is useful for commands that don't necessarily have any actor, e.g. debugging the contents of an ENR.
@@ -192,14 +195,18 @@ IGNORED_KEYs = ['actor', 'call_id', 'level', '@success', 'time']
 
 
 class Call(object):
-    data: Dict[str, Any]
-    _awaited_data: Dict[str, Future]
-    _queued_data: Dict[str, AsyncQueue]
+    rumor: Rumor
+    data: Dict[str, Any]  # merge of all data so far
+    _awaited_data: Dict[str, Future]  # one-time awaited specific keys
+    _queued_data: Dict[str, AsyncQueue]  # by specific key
+    q: AsyncQueue  # all logs
+    call_id: CallID
     cmd: str
     # Future to wait for command to complete, future raises exception if any error entry makes it first.
     ok: Future
 
-    def __init__(self, call_id: CallID, cmd: str):
+    def __init__(self, rumor: Rumor, call_id: CallID, cmd: str):
+        self.rumor = rumor
         self.data = {}
         self._awaited_data = {}
         self._queued_data = {}
@@ -258,6 +265,9 @@ class Call(object):
         while True:
             v = await self.q.get()
             yield v
+
+    async def cancel(self):
+        await self.rumor.cancel_call(self.call_id)
 
     def __getattr__(self, item) -> Callable[[], Union[Coroutine, AsyncGenerator]]:
         if not isinstance(item, str):
