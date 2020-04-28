@@ -36,7 +36,6 @@ Each of these calls returns a `Call` object:
 ### Full example
 
 ```python
-
 from remerkleable.complex import Container
 from remerkleable.byte_arrays import Bytes32, Bytes4
 from remerkleable.basic import uint64
@@ -150,7 +149,8 @@ async def basic_rpc_example(rumor: Rumor):
 async def run_example():
     # Hook it up to your own local version of Rumor, if you like.
     # And optionally enable debug=True to be super verbose about Rumor communication.
-    async with Rumor(cmd='cd ../rumor && go run .') as rumor:
+    # Run it in "bare" mode so there is no shell clutter, and every Rumor output is JSON for Pyrum to parse.
+    async with Rumor(cmd='cd ../rumor && go run . bare') as rumor:
         await basic_rpc_example(rumor)
 
 trio.run(run_example)

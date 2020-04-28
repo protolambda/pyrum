@@ -86,7 +86,7 @@ class Rumor(object):
 
     actors: Dict[str, "Actor"]
 
-    def __init__(self, cmd: str = 'rumor', debug: bool = False):
+    def __init__(self, cmd: str = 'rumor bare', debug: bool = False):
         self._debug = debug
         self._cmd = cmd
         self.calls = {}
