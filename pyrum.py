@@ -5,6 +5,8 @@ import signal
 import trio
 import subprocess
 
+from trio_websocket import connect_websocket_url, WebSocketConnection as TrioWS
+
 # After a MAX_MSG_BUFFER_SIZE unprocessed messages, there will be back-pressure on the producer.
 MAX_MSG_BUFFER_SIZE = 1000
 
@@ -76,7 +78,7 @@ class TerminatedFrameReceiver:
 
 class RumorConn(Protocol):
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "RumorConn":
         ...
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -104,7 +106,7 @@ class SubprocessConn(RumorConn):
     def __init__(self, cmd: str = 'rumor bare'):
         self._cmd = cmd
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "SubprocessConn":
         self.rumor_process = await trio.open_process(
             self._cmd,
             stdin=subprocess.PIPE,
@@ -113,6 +115,7 @@ class SubprocessConn(RumorConn):
             shell=True,
         )
         self.input_reader = TerminatedFrameReceiver(self.rumor_process.stdout, b'\n')
+        return self
 
     def __aiter__(self):
         return self
@@ -122,7 +125,7 @@ class SubprocessConn(RumorConn):
 
     async def send_line(self, line: str):
         inp: trio.abc.SendStream = self.rumor_process.stdin
-        await inp.send_all((line + '\n').encode())
+        await inp.send_all((line + '\n').encode("utf-8"))
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         # Ask it nicely to stop
@@ -131,14 +134,50 @@ class SubprocessConn(RumorConn):
         await self.rumor_process.aclose()
 
 
-RumorConnFn = Callable[[], RumorConn]
+class WebsocketConn(RumorConn):
+    ws: TrioWS
+    _ws_url: str
+    _ws_api_key: str
+    _exit_nursery: Any
+
+    def __init__(self, ws_url: str = 'ws://localhost:8000/ws', ws_key: str = ''):
+        self._ws_url = ws_url
+        self._ws_api_key = ws_key
+
+    async def __aenter__(self) -> "WebsocketConn":
+        nursery_mng = trio.open_nursery()
+        # Open the websocket with a trio nursery that is maintained by hand,
+        # as the regular open_websocket_url has some weird async-generator context-manager Trio issue.
+        self._nursery = await nursery_mng.__aenter__()
+        self._exit_nursery = nursery_mng.__aexit__
+        headers = []
+        if self._ws_api_key != "":
+            headers.append(('X-Api-Key'.encode(), self._ws_api_key.encode()))
+        try:
+            ws_opener = await connect_websocket_url(self._nursery, self._ws_url, extra_headers=headers)
+            self.ws = await ws_opener.__aenter__()
+        except trio.Cancelled:
+            raise Exception("failed to open websocket, check address and ws api key")
+        return self
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        return await self.ws.get_message()
+
+    async def send_line(self, line: str):
+        await self.ws.send_message(line)
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.ws.__aexit__(exc_type, exc_val, exc_tb)
+        await self._exit_nursery(exc_type, exc_val, exc_tb)
 
 
 class Rumor(object):
     calls: Dict[CallID, "Call"]
     _unique_call_id_counter: int
     _debug: bool
-    _conn_fn: RumorConnFn
     _rumor_conn: RumorConn
     _nursery: trio.Nursery
     _exit_nursery: Any
@@ -146,9 +185,9 @@ class Rumor(object):
 
     actors: Dict[str, "Actor"]
 
-    def __init__(self, conn_fn: RumorConnFn, debug: bool = False):
+    def __init__(self, conn: RumorConn, debug: bool = False):
         self._debug = debug
-        self._conn_fn = conn_fn
+        self._rumor_conn = conn
         self.calls = {}
         self.actors = {}
         self._unique_call_id_counter = 0
@@ -158,8 +197,6 @@ class Rumor(object):
         self._nursery = await nursery_mng.__aenter__()
         self._exit_nursery = nursery_mng.__aexit__
 
-        self._rumor_conn = self._conn_fn()
-        x = await self._rumor_conn.__aenter__()
         self._to_rumor, _for_rumor = trio.open_memory_channel(20)  # buffer information to be sent to rumor
 
         async def write_loop():
@@ -170,8 +207,9 @@ class Rumor(object):
 
         async def read_loop():
             async for line in self._rumor_conn:
+                line = str(line)
                 if self._debug:
-                    print('Received line from Rumor:' + str(line))
+                    print('Received line from Rumor:' + line)
 
                 try:
                     entry: Dict[str, Any] = json.loads(line)
@@ -209,7 +247,6 @@ class Rumor(object):
         self._nursery.cancel_scope.cancel()
         # Stop all tasks that use the process
         await self._exit_nursery(exc_type, exc_val, exc_tb)
-        await self._rumor_conn.__aexit__(exc_type, exc_val, exc_tb)
 
     def actor(self, name: str) -> "Actor":
         if name not in self.actors:
