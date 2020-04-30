@@ -1,9 +1,11 @@
 import json
 
-from typing import List, Dict, Any, Callable, Tuple
+from typing import List, Dict, Any, Callable, Tuple, Protocol
 import signal
 import trio
 import subprocess
+
+from trio_websocket import connect_websocket_url, WebSocketConnection as TrioWS
 
 # After a MAX_MSG_BUFFER_SIZE unprocessed messages, there will be back-pressure on the producer.
 MAX_MSG_BUFFER_SIZE = 1000
@@ -29,6 +31,7 @@ class TerminatedFrameReceiver:
       algorithms are amortized O(n) in the length of the input.
 
     """
+
     def __init__(self, stream, terminator, max_frame_length=16384):
         self.stream = stream
         self.terminator = terminator
@@ -59,7 +62,7 @@ class TerminatedFrameReceiver:
                 frame = self._buf[:terminator_idx]
                 # Update the buffer in place, to take advantage of bytearray's
                 # optimized delete-from-beginning feature.
-                del self._buf[:terminator_idx+len(self.terminator)]
+                del self._buf[:terminator_idx + len(self.terminator)]
                 # next time, start the search from the beginning
                 self._next_find_idx = 0
                 return frame
@@ -74,21 +77,167 @@ class TerminatedFrameReceiver:
             raise StopAsyncIteration
 
 
+class RumorConn(Protocol):
+
+    async def __aenter__(self) -> "RumorConn":
+        ...
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        ...
+
+    def __aiter__(self):
+        return self
+
+    # Get next line
+    async def __anext__(self) -> str:
+        ...
+
+    async def send_line(self, line: str):
+        ...
+
+    async def close(self):
+        ...
+
+
+class SubprocessConn(RumorConn):
+    rumor_process: trio.Process
+    input_reader: TerminatedFrameReceiver
+    _cmd: str
+
+    def __init__(self, cmd: str = 'rumor bare'):
+        self._cmd = cmd
+
+    async def __aenter__(self) -> "SubprocessConn":
+        self.rumor_process = await trio.open_process(
+            self._cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=True,
+        )
+        self.input_reader = TerminatedFrameReceiver(self.rumor_process.stdout, b'\n')
+        return self
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        return (await self.input_reader.__anext__()).decode("utf-8")
+
+    async def send_line(self, line: str):
+        inp: trio.abc.SendStream = self.rumor_process.stdin
+        await inp.send_all((line + '\n').encode("utf-8"))
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        # Ask it nicely to stop
+        self.rumor_process.send_signal(signal.SIGINT)
+        # Wait for it to complete
+        await self.rumor_process.aclose()
+
+
+class BaseSocketConn(RumorConn):
+    socket: trio.SocketStream
+    input_reader: TerminatedFrameReceiver
+    _cmd: str
+
+    async def __aenter__(self) -> "BaseSocketConn":
+        raise NotImplementedError
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        return (await self.input_reader.__anext__()).decode("utf-8")
+
+    async def send_line(self, line: str):
+        inp: trio.abc.SendStream = self.socket
+        await inp.send_all((line + '\n').encode("utf-8"))
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        # Wait for it to complete
+        await self.socket.aclose()
+
+
+class UnixConn(BaseSocketConn):
+    _socket_path: str
+
+    def __init__(self, socket_path: str = 'example.socket'):
+        self._socket_path = socket_path
+
+    async def __aenter__(self) -> "UnixConn":
+        self.socket = await trio.open_unix_socket(self._socket_path)
+        self.input_reader = TerminatedFrameReceiver(self.socket, b'\n')
+        return self
+
+
+class TCPConn(BaseSocketConn):
+    _addr: str
+    _port: int
+
+    def __init__(self, addr: str = 'localhost', port: int = 3030):
+        self._addr = addr
+        self._port = port
+
+    async def __aenter__(self) -> "TCPConn":
+        self.socket = await trio.open_tcp_stream(self._addr, self._port)
+        self.input_reader = TerminatedFrameReceiver(self.socket, b'\n')
+        return self
+
+
+class WebsocketConn(RumorConn):
+    ws: TrioWS
+    _ws_url: str
+    _ws_api_key: str
+    _exit_nursery: Any
+
+    def __init__(self, ws_url: str = 'ws://localhost:8000/ws', ws_key: str = ''):
+        self._ws_url = ws_url
+        self._ws_api_key = ws_key
+
+    async def __aenter__(self) -> "WebsocketConn":
+        nursery_mng = trio.open_nursery()
+        # Open the websocket with a trio nursery that is maintained by hand,
+        # as the regular open_websocket_url has some weird async-generator context-manager Trio issue.
+        self._nursery = await nursery_mng.__aenter__()
+        self._exit_nursery = nursery_mng.__aexit__
+        headers = []
+        if self._ws_api_key != "":
+            headers.append(('X-Api-Key'.encode(), self._ws_api_key.encode()))
+        try:
+            ws_opener = await connect_websocket_url(self._nursery, self._ws_url, extra_headers=headers)
+            self.ws = await ws_opener.__aenter__()
+        except trio.Cancelled:
+            raise Exception("failed to open websocket, check address and ws api key")
+        return self
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        return await self.ws.get_message()
+
+    async def send_line(self, line: str):
+        await self.ws.send_message(line)
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.ws.__aexit__(exc_type, exc_val, exc_tb)
+        await self._exit_nursery(exc_type, exc_val, exc_tb)
+
+
 class Rumor(object):
     calls: Dict[CallID, "Call"]
     _unique_call_id_counter: int
-    _cmd: str
     _debug: bool
+    _rumor_conn: RumorConn
     _nursery: trio.Nursery
     _exit_nursery: Any
-    rumor_process: trio.Process
     _to_rumor: trio.MemorySendChannel
 
     actors: Dict[str, "Actor"]
 
-    def __init__(self, cmd: str = 'rumor bare', debug: bool = False):
+    def __init__(self, conn: RumorConn, debug: bool = False):
         self._debug = debug
-        self._cmd = cmd
+        self._rumor_conn = conn
         self.calls = {}
         self.actors = {}
         self._unique_call_id_counter = 0
@@ -98,27 +247,19 @@ class Rumor(object):
         self._nursery = await nursery_mng.__aenter__()
         self._exit_nursery = nursery_mng.__aexit__
 
-        self.rumor_process = await trio.open_process(
-            self._cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=True,
-        )
-
         self._to_rumor, _for_rumor = trio.open_memory_channel(20)  # buffer information to be sent to rumor
 
         async def write_loop():
             async for line in _for_rumor:
                 if self._debug:
                     print('Sending line to Rumor:' + str(line))
-                inp: trio.abc.SendStream = self.rumor_process.stdin
-                await inp.send_all((line + '\n').encode())
+                await self._rumor_conn.send_line(line)
 
         async def read_loop():
-            async for line in TerminatedFrameReceiver(self.rumor_process.stdout, b'\n'):
+            async for line in self._rumor_conn:
+                line = str(line)
                 if self._debug:
-                    print('Received line from Rumor:' + str(line))
+                    print('Received line from Rumor:' + line)
 
                 try:
                     entry: Dict[str, Any] = json.loads(line)
@@ -156,10 +297,6 @@ class Rumor(object):
         self._nursery.cancel_scope.cancel()
         # Stop all tasks that use the process
         await self._exit_nursery(exc_type, exc_val, exc_tb)
-        # Ask it nicely to stop
-        self.rumor_process.send_signal(signal.SIGINT)
-        # Wait for it to complete
-        await self.rumor_process.aclose()
 
     def actor(self, name: str) -> "Actor":
         if name not in self.actors:
@@ -190,7 +327,8 @@ class Rumor(object):
 
 def args_to_call_path(*args, **kwargs) -> List[str]:
     # TODO: maybe escape values?
-    return [(f'"{value}"' if isinstance(value, str) else str(value)) for value in args] + [f'--{key.replace("_", "-")}="{value}"' for key, value in kwargs.items()]
+    return [(f'"{value}"' if isinstance(value, str) else str(value)) for value in args] + \
+           [f'--{key.replace("_", "-")}="{value}"' for key, value in kwargs.items()]
 
 
 class Actor(object):
