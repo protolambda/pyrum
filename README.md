@@ -167,11 +167,12 @@ async def run_example():
     # Run it in "bare" mode so there is no shell clutter, and every Rumor output is JSON for Pyrum to parse.
     # Optionally specify your own rumor executable, for local development/modding of Rumor
     async with SubprocessConn(cmd='cd ../rumor && go run . bare') as conn:
-        # And optionally use Rumor(conn, debug=True) to be super verbose about Rumor communication.
-        async with Rumor(conn) as rumor:
-            await basic_rpc_example(rumor)
-
-trio.run(run_example)
+        # A Trio nursery hosts all the async tasks of the Rumor instance.
+        async with trio.open_nursery() as nursery:
+            # And optionally use Rumor(conn, debug=True) to be super verbose about Rumor communication.
+            await basic_rpc_example(Rumor(conn, nursery))
+            # Cancel the nursery to signal that we are not using Rumor anymore
+            nursery.cancel_scope.cancel()
 ```
 
 Example Output:

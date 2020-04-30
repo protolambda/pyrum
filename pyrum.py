@@ -230,22 +230,17 @@ class Rumor(object):
     _debug: bool
     _rumor_conn: RumorConn
     _nursery: trio.Nursery
-    _exit_nursery: Any
     _to_rumor: trio.MemorySendChannel
 
     actors: Dict[str, "Actor"]
 
-    def __init__(self, conn: RumorConn, debug: bool = False):
+    def __init__(self, conn: RumorConn, nursery: trio.Nursery, debug: bool = False):
         self._debug = debug
+        self._nursery = nursery
         self._rumor_conn = conn
         self.calls = {}
         self.actors = {}
         self._unique_call_id_counter = 0
-
-    async def __aenter__(self) -> "Rumor":
-        nursery_mng = trio.open_nursery()
-        self._nursery = await nursery_mng.__aenter__()
-        self._exit_nursery = nursery_mng.__aexit__
 
         self._to_rumor, _for_rumor = trio.open_memory_channel(20)  # buffer information to be sent to rumor
 
@@ -290,13 +285,6 @@ class Rumor(object):
 
         self._nursery.start_soon(write_loop)
         self._nursery.start_soon(read_loop)
-
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        self._nursery.cancel_scope.cancel()
-        # Stop all tasks that use the process
-        await self._exit_nursery(exc_type, exc_val, exc_tb)
 
     def actor(self, name: str) -> "Actor":
         if name not in self.actors:
