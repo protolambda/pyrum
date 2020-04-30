@@ -37,7 +37,7 @@ Each of these calls returns a `Call` object:
 
 ```python
 import trio
-from pyrum import SubprocessConn, WebsocketConn, Rumor
+from pyrum import WebsocketConn, TCPConn, UnixConn, SubprocessConn, Rumor
 
 from remerkleable.complex import Container
 from remerkleable.byte_arrays import Bytes32, Bytes4
@@ -150,17 +150,24 @@ async def basic_rpc_example(rumor: Rumor):
 
 
 async def run_example():
-    # Hook it up to your own local version of Rumor, if you like.
-    # And optionally enable debug=True to be super verbose about Rumor communication.
-
     # Websockets
     # Start Rumor with websocket serving enabled, then open a connection from rumor:
     # rumor serve --ws=localhost:8010 --ws-path=/ws --ws-key=foobar
     # async with WebsocketConn(ws_url='ws://localhost:8010/ws', ws_key='foobar') as conn:
 
+    # TCP sockets
+    # rumor serve --tcp localhost:3030
+    # async with TCPConn(addr='localhost', port=3030) as conn:
+
+    # Unix domain sockets
+    # rumor serve --ipc my_ipc.socket
+    # async with UnixConn(socket_path='../some/path/my_ipc.socket') as conn:
+
     # Subprocess
     # Run it in "bare" mode so there is no shell clutter, and every Rumor output is JSON for Pyrum to parse.
+    # Optionally specify your own rumor executable, for local development/modding of Rumor
     async with SubprocessConn(cmd='cd ../rumor && go run . bare') as conn:
+        # And optionally use Rumor(conn, debug=True) to be super verbose about Rumor communication.
         async with Rumor(conn) as rumor:
             await basic_rpc_example(rumor)
 

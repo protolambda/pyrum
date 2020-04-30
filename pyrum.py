@@ -31,6 +31,7 @@ class TerminatedFrameReceiver:
       algorithms are amortized O(n) in the length of the input.
 
     """
+
     def __init__(self, stream, terminator, max_frame_length=16384):
         self.stream = stream
         self.terminator = terminator
@@ -61,7 +62,7 @@ class TerminatedFrameReceiver:
                 frame = self._buf[:terminator_idx]
                 # Update the buffer in place, to take advantage of bytearray's
                 # optimized delete-from-beginning feature.
-                del self._buf[:terminator_idx+len(self.terminator)]
+                del self._buf[:terminator_idx + len(self.terminator)]
                 # next time, start the search from the beginning
                 self._next_find_idx = 0
                 return frame
@@ -132,6 +133,55 @@ class SubprocessConn(RumorConn):
         self.rumor_process.send_signal(signal.SIGINT)
         # Wait for it to complete
         await self.rumor_process.aclose()
+
+
+class BaseSocketConn(RumorConn):
+    socket: trio.SocketStream
+    input_reader: TerminatedFrameReceiver
+    _cmd: str
+
+    async def __aenter__(self) -> "BaseSocketConn":
+        raise NotImplementedError
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        return (await self.input_reader.__anext__()).decode("utf-8")
+
+    async def send_line(self, line: str):
+        inp: trio.abc.SendStream = self.socket
+        await inp.send_all((line + '\n').encode("utf-8"))
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        # Wait for it to complete
+        await self.socket.aclose()
+
+
+class UnixConn(BaseSocketConn):
+    _socket_path: str
+
+    def __init__(self, socket_path: str = 'example.socket'):
+        self._socket_path = socket_path
+
+    async def __aenter__(self) -> "UnixConn":
+        self.socket = await trio.open_unix_socket(self._socket_path)
+        self.input_reader = TerminatedFrameReceiver(self.socket, b'\n')
+        return self
+
+
+class TCPConn(BaseSocketConn):
+    _addr: str
+    _port: int
+
+    def __init__(self, addr: str = 'localhost', port: int = 3030):
+        self._addr = addr
+        self._port = port
+
+    async def __aenter__(self) -> "TCPConn":
+        self.socket = await trio.open_tcp_stream(self._addr, self._port)
+        self.input_reader = TerminatedFrameReceiver(self.socket, b'\n')
+        return self
 
 
 class WebsocketConn(RumorConn):
@@ -277,7 +327,8 @@ class Rumor(object):
 
 def args_to_call_path(*args, **kwargs) -> List[str]:
     # TODO: maybe escape values?
-    return [(f'"{value}"' if isinstance(value, str) else str(value)) for value in args] + [f'--{key.replace("_", "-")}="{value}"' for key, value in kwargs.items()]
+    return [(f'"{value}"' if isinstance(value, str) else str(value)) for value in args] + \
+           [f'--{key.replace("_", "-")}="{value}"' for key, value in kwargs.items()]
 
 
 class Actor(object):
