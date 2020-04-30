@@ -18,7 +18,8 @@ setup(
     py_modules=["pyrum"],
     tests_require=[],
     install_requires=[
-        "trio==0.13.0"
+        "trio==0.13.0",
+        "trio-websocket==0.8.0"
     ],
     include_package_data=False,
     keywords=["rumor", "networking", "libp2p" "eth2"],

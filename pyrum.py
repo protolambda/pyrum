@@ -1,6 +1,6 @@
 import json
 
-from typing import List, Dict, Any, Callable, Tuple
+from typing import List, Dict, Any, Callable, Tuple, Protocol
 import signal
 import trio
 import subprocess
@@ -74,21 +74,81 @@ class TerminatedFrameReceiver:
             raise StopAsyncIteration
 
 
+class RumorConn(Protocol):
+
+    async def __aenter__(self):
+        ...
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        ...
+
+    def __aiter__(self):
+        return self
+
+    # Get next line
+    async def __anext__(self) -> str:
+        ...
+
+    async def send_line(self, line: str):
+        ...
+
+    async def close(self):
+        ...
+
+
+class SubprocessConn(RumorConn):
+    rumor_process: trio.Process
+    input_reader: TerminatedFrameReceiver
+    _cmd: str
+
+    def __init__(self, cmd: str = 'rumor bare'):
+        self._cmd = cmd
+
+    async def __aenter__(self):
+        self.rumor_process = await trio.open_process(
+            self._cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=True,
+        )
+        self.input_reader = TerminatedFrameReceiver(self.rumor_process.stdout, b'\n')
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        return (await self.input_reader.__anext__()).decode("utf-8")
+
+    async def send_line(self, line: str):
+        inp: trio.abc.SendStream = self.rumor_process.stdin
+        await inp.send_all((line + '\n').encode())
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        # Ask it nicely to stop
+        self.rumor_process.send_signal(signal.SIGINT)
+        # Wait for it to complete
+        await self.rumor_process.aclose()
+
+
+RumorConnFn = Callable[[], RumorConn]
+
+
 class Rumor(object):
     calls: Dict[CallID, "Call"]
     _unique_call_id_counter: int
-    _cmd: str
     _debug: bool
+    _conn_fn: RumorConnFn
+    _rumor_conn: RumorConn
     _nursery: trio.Nursery
     _exit_nursery: Any
-    rumor_process: trio.Process
     _to_rumor: trio.MemorySendChannel
 
     actors: Dict[str, "Actor"]
 
-    def __init__(self, cmd: str = 'rumor bare', debug: bool = False):
+    def __init__(self, conn_fn: RumorConnFn, debug: bool = False):
         self._debug = debug
-        self._cmd = cmd
+        self._conn_fn = conn_fn
         self.calls = {}
         self.actors = {}
         self._unique_call_id_counter = 0
@@ -98,25 +158,18 @@ class Rumor(object):
         self._nursery = await nursery_mng.__aenter__()
         self._exit_nursery = nursery_mng.__aexit__
 
-        self.rumor_process = await trio.open_process(
-            self._cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=True,
-        )
-
+        self._rumor_conn = self._conn_fn()
+        x = await self._rumor_conn.__aenter__()
         self._to_rumor, _for_rumor = trio.open_memory_channel(20)  # buffer information to be sent to rumor
 
         async def write_loop():
             async for line in _for_rumor:
                 if self._debug:
                     print('Sending line to Rumor:' + str(line))
-                inp: trio.abc.SendStream = self.rumor_process.stdin
-                await inp.send_all((line + '\n').encode())
+                await self._rumor_conn.send_line(line)
 
         async def read_loop():
-            async for line in TerminatedFrameReceiver(self.rumor_process.stdout, b'\n'):
+            async for line in self._rumor_conn:
                 if self._debug:
                     print('Received line from Rumor:' + str(line))
 
@@ -156,10 +209,7 @@ class Rumor(object):
         self._nursery.cancel_scope.cancel()
         # Stop all tasks that use the process
         await self._exit_nursery(exc_type, exc_val, exc_tb)
-        # Ask it nicely to stop
-        self.rumor_process.send_signal(signal.SIGINT)
-        # Wait for it to complete
-        await self.rumor_process.aclose()
+        await self._rumor_conn.__aexit__(exc_type, exc_val, exc_tb)
 
     def actor(self, name: str) -> "Actor":
         if name not in self.actors:

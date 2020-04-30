@@ -150,7 +150,7 @@ async def run_example():
     # Hook it up to your own local version of Rumor, if you like.
     # And optionally enable debug=True to be super verbose about Rumor communication.
     # Run it in "bare" mode so there is no shell clutter, and every Rumor output is JSON for Pyrum to parse.
-    async with Rumor(cmd='cd ../rumor && go run . bare') as rumor:
+    async with Rumor(lambda: SubprocessConn(cmd='cd ../rumor && go run . bare')) as rumor:
         await basic_rpc_example(rumor)
 
 trio.run(run_example)
