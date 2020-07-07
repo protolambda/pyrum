@@ -104,7 +104,7 @@ class SubprocessConn(RumorConn):
     input_reader: TerminatedFrameReceiver
     _cmd: str
 
-    def __init__(self, cmd: str = 'rumor bare'):
+    def __init__(self, cmd: str = 'rumor bare --level=trace --async=true'):
         self._cmd = cmd
 
     async def __aenter__(self) -> "SubprocessConn":
@@ -270,18 +270,11 @@ class Rumor(object):
                             continue
 
                         call: Call = self.calls[call_id]
-                        if call.ok.is_set():
+                        await call.send_ch.send(entry)
+
+                        if '__freed' in entry:
                             # call is over, remove it
                             del self.calls[call_id]
-                        else:
-                            await call.send_ch.send(entry)
-
-        async def debug_loop():
-            async for line in TerminatedFrameReceiver(self.rumor_process.stderr, b'\n'):
-                print(f"ERROR from Rumor: '{line}'")
-
-        if self.debug:
-            self._nursery.start_soon(debug_loop)
 
         self._nursery.start_soon(write_loop)
         self._nursery.start_soon(read_loop)
@@ -293,19 +286,19 @@ class Rumor(object):
 
     def make_call(self, actor: str, args: List[str]) -> "Call":
         # Get a unique call ID
-        call_id = f"py_${self._unique_call_id_counter}"
+        call_id = f"py_{self._unique_call_id_counter}"
         self._unique_call_id_counter += 1
         # Create the call, and remember it
         cmd = ' '.join(map(str, args))
         call = Call(self, call_id, cmd)
         self.calls[call_id] = call
         # Send the actual command, with call ID, to Rumor
-        self._nursery.start_soon(self._to_rumor.send, f'{call_id}> {actor}: bg {cmd}')
+        self._nursery.start_soon(self._to_rumor.send, f'_{call_id} {actor}: lvl_trace {cmd}')
         return call
 
     async def cancel_call(self, call_id: CallID):
         # Send the actual command, with call ID, to Rumor
-        await self._to_rumor.send(f'{call_id}> cancel')
+        await self._to_rumor.send(f'_{call_id} cancel')
 
     # No actor, Rumor will just default to a default-actor.
     # But this is useful for commands that don't necessarily have any actor, e.g. debugging the contents of an ENR.
@@ -348,7 +341,7 @@ class CallException(Exception):
         self.err_entry = err_entry
 
 
-IGNORED_KEYs = ['actor', 'call_id', 'level', '@success', 'time']
+IGNORED_KEYs = ['actor', 'call_id', 'level', '__success', '__freed', 'time']
 
 
 class AwaitableReadChannel(object):
@@ -369,7 +362,8 @@ class Call(object):
     data: Dict[str, Any]  # merge of all data so far
     _awaited_data: Dict[str, Tuple[trio.MemorySendChannel, trio.MemoryReceiveChannel]]  # data that is expected
     _send_ch: trio.MemorySendChannel
-    ok: trio.Event  # event when the call is finished
+    ok: trio.Event  # event when the call is done (just its setup if long-running)
+    freed: trio.Event  # event when the call is completely finished and freed
     call_id: CallID
     cmd: str
     all: AwaitableReadChannel  # to listen to all log result entries
@@ -382,6 +376,7 @@ class Call(object):
         self.call_id = call_id
         self.cmd = cmd
         self.ok = trio.Event()
+        self.freed = trio.Event()
         self.err = trio.Event()
         recv_ch: trio.MemoryReceiveChannel
         self.send_ch, recv_ch = trio.open_memory_channel(MAX_MSG_BUFFER_SIZE)
@@ -393,8 +388,11 @@ class Call(object):
             async for entry in recv_ch:
                 if entry['level'] == 'error':
                     self.err.set()
-                if '@success' in entry:
+                if '__success' in entry:  # Make the simple direct "await" complete as soon as the setup part is done.
                     self.ok.set()
+                    continue
+                if '__freed' in entry:  # Stop proxying logs/data when the command ends (including its background tasks)
+                    self.freed.set()
                     await send_all.aclose()
                     await recv_ch.aclose()
                     for (sch, rch) in self._awaited_data.values():
@@ -402,14 +400,15 @@ class Call(object):
                         await rch.aclose()
                     return
                 for k, v in entry.items():
-                    # If the data is being awaited, then push it into the channel
-                    if k not in self._awaited_data:
-                        self._awaited_data[k] = trio.open_memory_channel(MAX_MSG_BUFFER_SIZE)
-
-                    send_ch, _ = self._awaited_data[k]
-                    await send_ch.send(v)
                     # Merge in new result data, overwrite any previous data
                     if k not in IGNORED_KEYs:
+                        # If the data is being awaited, then push it into the channel
+                        if k not in self._awaited_data:
+                            self._awaited_data[k] = trio.open_memory_channel(MAX_MSG_BUFFER_SIZE)
+
+                        send_ch, _ = self._awaited_data[k]
+                        await send_ch.send(v)
+
                         self.data[k] = v
                 await send_all.send(entry)
 
@@ -417,6 +416,10 @@ class Call(object):
 
     async def cancel(self):
         await self.rumor.cancel_call(self.call_id)
+
+    async def finished(self) -> Dict[str, Any]:
+        await self.freed.wait()
+        return self.data
 
     async def _result(self) -> Dict[str, Any]:
         await self.ok.wait()

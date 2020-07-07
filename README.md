@@ -65,9 +65,9 @@ async def basic_rpc_example(rumor: Rumor):
     await bob.host.listen(tcp=9001)
     print("started bob")
 
-    long_call = alice.debug.sleep(5_000)  # sleep 5 seconds
+    long_call = alice.sleep('5s')  # sleep 5 seconds
     print('made long call')
-    short_call = alice.debug.sleep(3_000)  # sleep 3 seconds
+    short_call = alice.sleep('3s')  # sleep 3 seconds
     print('made short call')
 
     await short_call
@@ -76,28 +76,20 @@ async def basic_rpc_example(rumor: Rumor):
     print('done with long call')
 
     # Getting a result should be as easy as calling, and waiting for the key we are after
-    bob_addr = await bob.host.view().enr()
-    print('BOB has ENR: ', bob_addr)
-
-    # Print all ENR contents
-    await rumor.enr.view(bob_addr)
+    bob_addr = await bob.host.view().addr()
+    print('BOB has address: ', bob_addr)
 
     # Command arguments are just call arguments
     await alice.peer.connect(bob_addr)
     print("connected alice to bob!")
 
     # You can use either await or async-for to get data of a specific key
-    async for msg in bob.peer.list().msg():
-        print(f'bob peer list: {msg}')
+    async for addr in bob.host.view().addr():
+        print(f'bob has addr: {addr}')  # multiple addresses, but the last one matters most.
 
-    async for msg in alice.peer.list().msg():
-        print(f'alice peer list: {msg}')
-
-    # Or alternatively, collect all result data from the call:
-    bob_addr_data = await rumor.enr.view(bob_addr)
-
-    print("--- BOB host view data: ---")
-    print("\n".join(f"{k}: {v}" for k, v in bob_addr_data.items()))
+    # Optionally request more peer details
+    peerdata = await alice.peer.list(details=True).peers()
+    print(f'alice peer list: {peerdata}')
 
     print("Testing a Status RPC exchange")
 
@@ -109,9 +101,14 @@ async def basic_rpc_example(rumor: Rumor):
     async def alice_work(nursery: trio.Nursery) -> Call:
         print("alice: listening for status requests")
         call = alice.rpc.status.listen(raw=True)
+        # Wait for inital completion of setup, i.e. the listener is online.
+        # It will stay open in the background, until `await call.finished()`
+        await call
 
         async def process_requests():
-            async for req in call.req():
+            async for req in call.all:
+                if 'req_id' not in req:  # Ignore other logs
+                    continue
                 print(f"alice: Got request: {req}")
                 assert 'input_err' not in req
                 # Or send back an error; await alice.rpc.status.resp.invalid_request(req['req_id'], f"hello! Your request was invalid, because: {req['input_err']}").ok
@@ -123,7 +120,6 @@ async def basic_rpc_example(rumor: Rumor):
 
         nursery.start_soon(process_requests)
 
-        await call.started()  # wait for the stream handler to come online, there will be a "started=true" entry.
         return call
 
     async def bob_work():
@@ -165,14 +161,17 @@ async def run_example():
 
     # Subprocess
     # Run it in "bare" mode so there is no shell clutter, and every Rumor output is JSON for Pyrum to parse.
+    # Make sure to enable trace log level, so async commands learn when they are finished properly (via a trace log).
     # Optionally specify your own rumor executable, for local development/modding of Rumor
-    async with SubprocessConn(cmd='cd ../rumor && go run . bare') as conn:
+    async with SubprocessConn(cmd='cd ../rumor && go run . bare  --level=trace --async=true') as conn:
         # A Trio nursery hosts all the async tasks of the Rumor instance.
         async with trio.open_nursery() as nursery:
-            # And optionally use Rumor(conn, debug=True) to be super verbose about Rumor communication.
-            await basic_rpc_example(Rumor(conn, nursery))
+            # And optionally use Rumor(conn, nursery, debug=True) to be super verbose about Rumor communication.
+            await basic_rpc_example(Rumor(conn, nursery, debug=True))
             # Cancel the nursery to signal that we are not using Rumor anymore
             nursery.cancel_scope.cancel()
+
+trio.run(run_example)
 ```
 
 Example Output:
