@@ -104,7 +104,7 @@ class SubprocessConn(RumorConn):
     input_reader: TerminatedFrameReceiver
     _cmd: str
 
-    def __init__(self, cmd: str = 'rumor bare --level=trace --async=true'):
+    def __init__(self, cmd: str = 'rumor bare'):
         self._cmd = cmd
 
     async def __aenter__(self) -> "SubprocessConn":
@@ -293,12 +293,14 @@ class Rumor(object):
         call = Call(self, call_id, cmd)
         self.calls[call_id] = call
         # Send the actual command, with call ID, to Rumor
-        self._nursery.start_soon(self._to_rumor.send, f'_{call_id} {actor}: lvl_trace {cmd}')
+        # Trace level is enabled so we get the call data (when it is done, frees, steps, etc)
+        # With "&" it will go into the background, so we can start firing new commands immediately.
+        self._nursery.start_soon(self._to_rumor.send, f'_{call_id} {actor}: lvl_trace {cmd} &')
         return call
 
     async def cancel_call(self, call_id: CallID):
         # Send the actual command, with call ID, to Rumor
-        await self._to_rumor.send(f'_{call_id} cancel')
+        await self._to_rumor.send(f'_{call_id} cancel &')
 
     # No actor, Rumor will just default to a default-actor.
     # But this is useful for commands that don't necessarily have any actor, e.g. debugging the contents of an ENR.

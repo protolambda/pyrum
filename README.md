@@ -161,9 +161,8 @@ async def run_example():
 
     # Subprocess
     # Run it in "bare" mode so there is no shell clutter, and every Rumor output is JSON for Pyrum to parse.
-    # Make sure to enable trace log level, so async commands learn when they are finished properly (via a trace log).
     # Optionally specify your own rumor executable, for local development/modding of Rumor
-    async with SubprocessConn(cmd='cd ../rumor && go run . bare  --level=trace --async=true') as conn:
+    async with SubprocessConn(cmd='cd ../rumor && go run . bare') as conn:
         # A Trio nursery hosts all the async tasks of the Rumor instance.
         async with trio.open_nursery() as nursery:
             # And optionally use Rumor(conn, nursery, debug=True) to be super verbose about Rumor communication.
