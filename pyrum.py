@@ -1,6 +1,6 @@
 import json
 
-from typing import List, Dict, Any, Callable, Tuple, Protocol
+from typing import List, Dict, Any, Callable, Tuple, Protocol, Coroutine
 import signal
 import trio
 import subprocess
@@ -299,8 +299,10 @@ class Rumor(object):
         return call
 
     async def cancel_call(self, call_id: CallID):
-        # Send the actual command, with call ID, to Rumor
         await self._to_rumor.send(f'_{call_id} cancel &')
+
+    async def next_call(self, call_id: CallID):
+        await self._to_rumor.send(f'_{call_id} next &')
 
     # No actor, Rumor will just default to a default-actor.
     # But this is useful for commands that don't necessarily have any actor, e.g. debugging the contents of an ENR.
@@ -359,6 +361,20 @@ class AwaitableReadChannel(object):
         return self.recv.receive().__await__()
 
 
+class StepChannel(object):
+    next: Callable[[], Coroutine]
+
+    def __init__(self, next):
+        self.next = next
+
+    async def __anext__(self):
+        try:
+            return await self.next()
+        except Exception:
+            print("stopping iteration!")
+            raise StopAsyncIteration
+
+
 class Call(object):
     rumor: Rumor
     data: Dict[str, Any]  # merge of all data so far
@@ -369,6 +385,7 @@ class Call(object):
     call_id: CallID
     cmd: str
     all: AwaitableReadChannel  # to listen to all log result entries
+    steps: AwaitableReadChannel
     err: trio.Event  # event when the call encounters any error (the listener may decide to ignore)
 
     def __init__(self, rumor: Rumor, call_id: CallID, cmd: str):
@@ -385,6 +402,9 @@ class Call(object):
         send_all: trio.MemorySendChannel
         send_all, recv_all = trio.open_memory_channel(MAX_MSG_BUFFER_SIZE)
         self.all = AwaitableReadChannel(recv_all)
+        send_steps: trio.MemorySendChannel
+        send_steps, recv_steps = trio.open_memory_channel(MAX_MSG_BUFFER_SIZE)
+        self.steps = AwaitableReadChannel(recv_steps)
 
         async def process_messages():
             async for entry in recv_ch:
@@ -393,14 +413,24 @@ class Call(object):
                 if '__success' in entry:  # Make the simple direct "await" complete as soon as the setup part is done.
                     self.ok.set()
                     continue
+
+                if '__step' in entry:  # Upon a step completion, send a copy of the current data to the step channel.
+                    # shallow-copy to not change data reported in the step async.
+                    await send_steps.send({**self.data})
+                    continue
+
                 if '__freed' in entry:  # Stop proxying logs/data when the command ends (including its background tasks)
                     self.freed.set()
                     await send_all.aclose()
+                    await send_steps.aclose()
+                    await recv_steps.aclose()
+                    await self.send_ch.aclose()
                     await recv_ch.aclose()
                     for (sch, rch) in self._awaited_data.values():
                         await sch.aclose()
                         await rch.aclose()
                     return
+
                 for k, v in entry.items():
                     # Merge in new result data, overwrite any previous data
                     if k not in IGNORED_KEYs:
@@ -412,12 +442,23 @@ class Call(object):
                         await send_ch.send(v)
 
                         self.data[k] = v
+
                 await send_all.send(entry)
 
         rumor._nursery.start_soon(process_messages)
 
     async def cancel(self):
         await self.rumor.cancel_call(self.call_id)
+
+    async def next(self):
+        # Wait for call to get started first (second call will not block)
+        await self.ok.wait()
+        # Ask for next step
+        await self.rumor.next_call(self.call_id)
+        # Wait for next step
+        return await self.steps
+
+    # TODO: aiter that steps through call by repeatedly calling next, until call is finished.
 
     async def finished(self) -> Dict[str, Any]:
         await self.freed.wait()
@@ -429,6 +470,9 @@ class Call(object):
 
     def __await__(self):
         return self._result().__await__()
+
+    def __aiter__(self):
+        return StepChannel(self.next)
 
     def __getattr__(self, item) -> Callable[[], AwaitableReadChannel]:
         if not isinstance(item, str):

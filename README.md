@@ -106,12 +106,11 @@ async def basic_rpc_example(rumor: Rumor):
         await call
 
         async def process_requests():
-            async for req in call.all:
-                if 'req_id' not in req:  # Ignore other logs
-                    continue
+            # Each req object is a dict with all the latest log data at the time of completion of the step.
+            async for req in call:
                 print(f"alice: Got request: {req}")
                 assert 'input_err' not in req
-                # Or send back an error; await alice.rpc.status.resp.invalid_request(req['req_id'], f"hello! Your request was invalid, because: {req['input_err']}").ok
+                # Or send back an error; await alice.rpc.status.resp.invalid_request(req['req_id'], f"hello! Your request was invalid, because: {req['input_err']}")
                 assert req['data'] == bob_status.encode_bytes().hex()
                 resp = alice_status.encode_bytes().hex()
                 print(f"alice: sending response back to request {req['req_id']}: {resp}")
@@ -126,12 +125,17 @@ async def basic_rpc_example(rumor: Rumor):
         # Send alice a status request
         req = bob_status.encode_bytes().hex()
         print(f"bob: sending alice ({alice_peer_id}) a status request: {req}")
-        resp = await bob.rpc.status.req.raw(alice_peer_id, req, raw=True)
+        req_call = bob.rpc.status.req.raw(alice_peer_id, req, raw=True)
+        await req_call
+        # Await request to be written to stream
+        await req_call.next()
+        # Await first (and only) response chunk
+        resp = await req_call.next()
+
         print(f"bob: received status response from alice: {resp}")
-        chunk = resp['chunk']
-        assert chunk['chunk_index'] == 0  # only 1 chunk
-        assert chunk['result_code'] == 0  # success chunk
-        assert chunk['data'] == alice_status.encode_bytes().hex()
+        assert resp['chunk_index'] == 0  # first chunk
+        assert resp['result_code'] == 0  # success chunk
+        assert resp['data'] == alice_status.encode_bytes().hex()
 
     # Run tasks in a trio nursery to make them concurrent
     async with trio.open_nursery() as nursery:
@@ -141,7 +145,7 @@ async def basic_rpc_example(rumor: Rumor):
         # Make bob send a request and check a response, after alice is set up
         await bob_work()
 
-        # Close alice
+        # Close listener of alice
         await alice_listen_call.cancel()
 
 
@@ -162,13 +166,11 @@ async def run_example():
     # Subprocess
     # Run it in "bare" mode so there is no shell clutter, and every Rumor output is JSON for Pyrum to parse.
     # Optionally specify your own rumor executable, for local development/modding of Rumor
-    async with SubprocessConn(cmd='cd ../rumor && go run . bare') as conn:
+    async with SubprocessConn(cmd='cd ../rumor && go run . bare --level=trace') as conn:
         # A Trio nursery hosts all the async tasks of the Rumor instance.
         async with trio.open_nursery() as nursery:
             # And optionally use Rumor(conn, nursery, debug=True) to be super verbose about Rumor communication.
             await basic_rpc_example(Rumor(conn, nursery, debug=True))
-            # Cancel the nursery to signal that we are not using Rumor anymore
-            nursery.cancel_scope.cancel()
 
 trio.run(run_example)
 ```
@@ -181,30 +183,17 @@ made long call
 made short call
 done with short call
 done with long call
-BOB has ENR:  enr:-Iu4QJsaKuzeeK1kdN2RezOUVGw2W57Du2Js-u1uuLqzcFLkYeoEty9XPWxJ8lNGf23ZHBEUQ7tnB_HQ5Gw9phdsWZaAgmlkgnY0gmlwhMCoAE2Jc2VjcDI1NmsxoQPPxmeIkd_qGoJ7p6ckO4ZKKOnOidet-lDsRfDgSv2R5IN0Y3CCIymDdWRwgiMp
+BOB has address:  /ip4/127.0.0.1/tcp/9001/p2p/16Uiu2HAm4ZYRU2J9pmsCLnYSfmGEQSsCCAaHD5aXr2MheSUf7egu
 connected alice to bob!
-bob peer list: 1 peers
-bob peer list:    0: {16Uiu2HAmGf5dZYGcfkszFcYzhYMpkFohcVHSAsd8NBJwDDahHNQK: [/ip4/192.168.0.77/tcp/9000]}
-alice peer list: 1 peers
-alice peer list:    0: {16Uiu2HAmSe4DMy8dZneZUovFPAPqmbm3FWonHiabr9w3RUnnJ7Cw: [/ip4/192.168.0.77/tcp/9001]}
---- BOB host view data: ---
-enode: enode://cfc6678891dfea1a827ba7a7243b864a28e9ce89d7adfa50ec45f0e04afd91e4cd3007b21b5d5012524cc28045a06efe34f03868f68da68b0d06c7cf621bd921@192.168.0.77:9001
-enr: enr:-Iu4QJsaKuzeeK1kdN2RezOUVGw2W57Du2Js-u1uuLqzcFLkYeoEty9XPWxJ8lNGf23ZHBEUQ7tnB_HQ5Gw9phdsWZaAgmlkgnY0gmlwhMCoAE2Jc2VjcDI1NmsxoQPPxmeIkd_qGoJ7p6ckO4ZKKOnOidet-lDsRfDgSv2R5IN0Y3CCIymDdWRwgiMp
-msg: ENR parsed successfully
-multi: /ip4/192.168.0.77/tcp/9001/p2p/16Uiu2HAmSe4DMy8dZneZUovFPAPqmbm3FWonHiabr9w3RUnnJ7Cw
-node_id: 00c7eeec07527edbf72dff6d84d0dcdb9f2e1eacd54372db530a515b01b6941f
-peer_id: 16Uiu2HAmSe4DMy8dZneZUovFPAPqmbm3FWonHiabr9w3RUnnJ7Cw
-seq: 0
-xy: 93979309937351124012010597461777211511079463010981099424184477356342451737060 92808995732655724877169966925472115400857265498307667452857464010673380645153
+bob has addr: /ip4/127.0.0.1/tcp/9001/p2p/16Uiu2HAm4ZYRU2J9pmsCLnYSfmGEQSsCCAaHD5aXr2MheSUf7egu
+bob has addr: /ip4/192.168.0.77/tcp/9001/p2p/16Uiu2HAm4ZYRU2J9pmsCLnYSfmGEQSsCCAaHD5aXr2MheSUf7egu
+alice peer list: {'16Uiu2HAm4ZYRU2J9pmsCLnYSfmGEQSsCCAaHD5aXr2MheSUf7egu': {'peer_id': '16Uiu2HAm4ZYRU2J9pmsCLnYSfmGEQSsCCAaHD5aXr2MheSUf7egu', 'node_id': '384cbbccd148b82a96138d552e6909225d4169bfaf0b1ea27ccd10e02141187e', 'pubkey': '0287bd489f112f9d43bc04b7c561df3b93d35f1311b6d52df524321b7485e2012e', 'addrs': ['/ip4/127.0.0.1/tcp/9001', '/ip4/192.168.0.77/tcp/9001'], 'protocols': ['/p2p/id/delta/1.0.0', '/ipfs/ping/1.0.0', '/libp2p/circuit/relay/0.1.0', '/ipfs/id/1.0.0', '/ipfs/id/push/1.0.0'], 'user_agent': 'Rumor', 'protocol_version': 'ipfs/0.1.0'}}
 Testing a Status RPC exchange
 alice: listening for status requests
-bob: sending alice (16Uiu2HAmGf5dZYGcfkszFcYzhYMpkFohcVHSAsd8NBJwDDahHNQK) a status request: 000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007b00000000000000
-alice: Got request: {'data': '000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007b00000000000000', 'from': '16Uiu2HAmSe4DMy8dZneZUovFPAPqmbm3FWonHiabr9w3RUnnJ7Cw', 'protocol': '/eth2/beacon_chain/req/status/1/ssz', 'req_id': 0}
+bob: sending alice (16Uiu2HAm6QTKBBzwpPGt1R8SQHHrUex3czzhd23VnbDkVztwibgD) a status request: 000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007b00000000000000
+alice: Got request: {'msg': 'Received request, queued it to respond to!', 'data': '000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007b00000000000000', 'from': '16Uiu2HAm4ZYRU2J9pmsCLnYSfmGEQSsCCAaHD5aXr2MheSUf7egu', 'protocol': '/eth2/beacon_chain/req/status/1/ssz_snappy', 'req_id': 0}
 alice: sending response back to request 0: 000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002a00000000000000
-bob: received status response from alice: {'chunk': {'chunk_index': 0, 'chunk_size': 84, 'data': '000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002a00000000000000', 'from': '16Uiu2HAmGf5dZYGcfkszFcYzhYMpkFohcVHSAsd8NBJwDDahHNQK', 'protocol': '/eth2/beacon_chain/req/status/1/ssz', 'result_code': 0}, 'msg': 'Received chunk'}
-alice: stopped listening for status requests
-
-Process finished with exit code 0
+bob: received status response from alice: {'msg': 'Received chunk', 'chunk_index': 0, 'chunk_size': 84, 'data': '000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002a00000000000000', 'from': '16Uiu2HAm6QTKBBzwpPGt1R8SQHHrUex3czzhd23VnbDkVztwibgD', 'protocol': '/eth2/beacon_chain/req/status/1/ssz_snappy', 'result_code': 0}
 ```
 
 
